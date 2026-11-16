@@ -970,6 +970,7 @@ dependencies = [
     { name = "tinker" },
     { name = "tinker-cookbook" },
     { name = "torch" },
+    { name = "transformers" },
     { name = "wandb" },
 ]
 
@@ -992,6 +993,7 @@ requires-dist = [
     { name = "tinker" },
     { name = "tinker-cookbook" },
     { name = "torch" },
+    { name = "transformers" },
     { name = "wandb" },
 ]
 provides-extras = ["dev"]

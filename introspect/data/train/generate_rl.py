@@ -97,6 +97,11 @@ def questions(investigation: Investigation) -> list[dict]:
                 experiment.edit,
             ),
             "answer": round(100 * experiment.behavior_count / experiment.num_rollouts),
+            # Read by train_rl.py use_jeffreys_targets.
+            "metadata": {
+                "counterfactual_count": experiment.behavior_count,
+                "counterfactual_rollout_count": experiment.num_rollouts,
+            },
         }
         for index, experiment in enumerate(investigation.experiments)
     ]

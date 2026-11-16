@@ -401,6 +401,8 @@ async def rl_step(
     kl_reference: tinker.SamplingClient | None,
 ) -> dict[str, float]:
     """Sample one group per item, keep the informative groups, and take one policy step."""
+    if not builders:  # fewer train items than num_steps leaves some steps with nothing to sample
+        return {"rl/groups_requested": 0.0, "rl/skipped_step": 1.0}
     groups = await asyncio.gather(
         *(
             do_group_rollout_and_filter_constant_reward(

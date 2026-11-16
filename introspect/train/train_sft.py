@@ -239,6 +239,11 @@ async def train(cfg: SFTConfig) -> None:
 
     test_data = [datum(item) for item in test_items]
     steps_per_epoch = len(train_items) // cfg.batch_size
+    if steps_per_epoch == 0:
+        raise ValueError(
+            f"{len(train_items)} train items is less than one batch; lower batch_size "
+            f"(now {cfg.batch_size}) or test_num_prompts (now {cfg.test_num_prompts})"
+        )
     num_steps = steps_per_epoch * cfg.num_epochs
 
     def batch(step: int) -> list[tinker.Datum]:
