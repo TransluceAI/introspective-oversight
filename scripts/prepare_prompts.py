@@ -1,0 +1,64 @@
+"""Download the public prompt sets the pipeline samples from, as JSONL ``{"prompt": ...}`` rows.
+
+    # OPD prompts for train_sft.py (and train_rl.py use_opd): all 896,050 single-turn Tulu 3 prompts
+    python scripts/prepare_prompts.py source=tulu3 output=data/prompts/tulu3_opd.jsonl
+    # User prompts for generate_sft.py: a seeded sample of single-turn Dolci prompts
+    python scripts/prepare_prompts.py source=dolci num_prompts=50000 output=data/prompts/dolci_50k.jsonl
+
+Both keep conversations that are exactly one user turn and one assistant reply, and keep only the
+user prompt. Tulu 3 is pinned to the revision the paper used, and its prompts keep their dataset
+order, which reproduces the paper's OPD prompt file exactly. The paper's 50k Dolci sample was
+drawn by an unrecorded procedure, so this draws a fresh seeded one.
+"""
+
+from __future__ import annotations
+
+import json
+import random
+from collections.abc import Iterable
+from pathlib import Path
+from typing import Any, Literal, cast
+
+import chz
+from datasets import load_dataset
+
+SOURCES = {
+    "tulu3": ("allenai/tulu-3-sft-mixture", "b14afda60f1bbebe55d5d2fa1e4df5042f97f8be"),
+    "dolci": ("allenai/Dolci-Instruct-SFT-7B", None),
+}
+
+
+@chz.chz
+class PrepareConfig:
+    source: Literal["tulu3", "dolci"]
+    output: str
+    num_prompts: int = 0  # 0 keeps every prompt; otherwise a seeded random sample
+    seed: int = 42
+
+
+def single_turn_prompts(rows: Iterable[dict[str, Any]]) -> list[str]:
+    """User prompts of one-turn conversations, in dataset order."""
+    prompts = []
+    for row in rows:
+        messages = row["messages"]
+        if [m["role"] for m in messages] == ["user", "assistant"] and messages[0]["content"].strip():
+            prompts.append(messages[0]["content"].strip())
+    return prompts
+
+
+def main(cfg: PrepareConfig) -> None:
+    name, revision = SOURCES[cfg.source]
+    dataset = load_dataset(name, revision=revision, split="train").select_columns(["messages"])
+    prompts = single_turn_prompts(cast(Iterable[dict[str, Any]], dataset))  # yields row dicts
+    if cfg.num_prompts:
+        prompts = random.Random(cfg.seed).sample(prompts, cfg.num_prompts)
+    output = Path(cfg.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w") as file:
+        for prompt in prompts:
+            file.write(json.dumps({"prompt": prompt}, ensure_ascii=False) + "\n")
+    print(f"wrote {len(prompts)} {cfg.source} prompts to {output}")
+
+
+if __name__ == "__main__":
+    chz.nested_entrypoint(main)
