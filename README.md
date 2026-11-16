@@ -1,5 +1,7 @@
 # Training Models for Introspective Oversight
 
+[![HuggingFace](https://img.shields.io/badge/🤗%20HuggingFace-Observer--Qwen3.6--27B-yellow)](https://huggingface.co/Transluce/Observer-Qwen3.6-27B)
+
 This repository contains the code for the paper **"Training Models for Introspective Oversight"**.
 
 We train a model to answer oversight questions about its own behavior in a separate **observer** role: given a conversation, the observer is asked a **query** (for example, "did the assistant lie?") and answers it. Training has two stages, and this repo lets you run both on your own model, then evaluate the result.
@@ -36,6 +38,8 @@ export GEMINI_API_KEY=...      # train_rl.py (judge_backend=gemini)
 | 2. RL | Observer predicts how often a behavior occurs after an edit to the prompt | Counterfactual experiments from [CHIVE](https://github.com/adamkarvonen/chive) | `introspect/train/train_rl.py` |
 
 Defaults reproduce the paper run: `Qwen/Qwen3.6-27B` with a rank-32 LoRA. Every script takes `key=value` arguments; pass `--help` to list them.
+
+**Pre-trained model:** the final stage-2 RL checkpoint from the paper is on Hugging Face at [Transluce/Observer-Qwen3.6-27B](https://huggingface.co/Transluce/Observer-Qwen3.6-27B). See the model card for how to load it.
 
 ---
 
