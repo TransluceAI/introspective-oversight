@@ -16,7 +16,7 @@ import logging
 import random
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import msgspec
 import tinker
@@ -183,50 +183,39 @@ def split_by_key(
 # --- OPD -------------------------------------------------------------------------------------
 
 
-class _OPDRow(msgspec.Struct):
-    """One prompt row. Accepts ``text``, ``prompt``, or chat ``messages``."""
+class UserPromptRow(msgspec.Struct):
+    """One line of a user-prompt file, as written by ``scripts/prepare_prompts.py``."""
 
-    text: str | None = None
-    prompt: str | None = None
-    messages: list[dict[str, Any]] | None = None
-
-    def user_prompt(self) -> str:
-        for value in (self.text, self.prompt):
-            if value and value.strip():
-                return value.strip()
-        for message in self.messages or []:
-            if message.get("role") == "user" and str(message.get("content", "")).strip():
-                return str(message["content"]).strip()
-        raise ValueError("OPD row has no text, prompt, or user message")
+    user_prompt: str
 
 
-def load_opd_prompts(paths: list[str]) -> list[str]:
-    """Read JSONL prompt files."""
-    decoder = msgspec.json.Decoder(_OPDRow)
-    prompts = [
-        decoder.decode(line).user_prompt()
+def read_user_prompts(paths: list[str]) -> list[str]:
+    """Read user-prompt JSONL files, one ``{"user_prompt": ...}`` per line, in file order."""
+    decoder = msgspec.json.Decoder(UserPromptRow)
+    user_prompts = [
+        decoder.decode(line).user_prompt.strip()
         for path in paths
         for line in Path(path).read_bytes().splitlines()
         if line.strip()
     ]
-    if not prompts:
-        raise ValueError("OPD prompt files contain no prompts")
-    return prompts
+    if not user_prompts:
+        raise ValueError(f"no user prompts in {paths}")
+    return user_prompts
 
 
-def opd_train_prompts(prompts: list[str], *, num_held_out: int, seed: int) -> list[str]:
-    """Drop ``num_held_out`` unique prompts, then shuffle the rest."""
+def opd_train_user_prompts(user_prompts: list[str], *, num_held_out: int, seed: int) -> list[str]:
+    """Drop ``num_held_out`` unique user prompts, then shuffle the rest."""
     if num_held_out:
-        train_set, _ = split_by_key(prompts, num_held_out=num_held_out, seed=seed)
-        prompts = [prompt for prompt in prompts if prompt in train_set]
+        train_set, _ = split_by_key(user_prompts, num_held_out=num_held_out, seed=seed)
+        user_prompts = [user_prompt for user_prompt in user_prompts if user_prompt in train_set]
     else:
-        prompts = list(prompts)
-    random.Random(seed).shuffle(prompts)
-    return prompts
+        user_prompts = list(user_prompts)
+    random.Random(seed).shuffle(user_prompts)
+    return user_prompts
 
 
 def build_opd_dataset(
-    prompts: list[str],
+    user_prompts: list[str],
     *,
     tokenizer: Tokenizer,
     groups_per_batch: int,
@@ -234,13 +223,13 @@ def build_opd_dataset(
     num_held_out: int,
     seed: int,
 ) -> RLDataset:
-    """Plain user -> assistant prompts; OPD never uses the observer role.
+    """Plain user -> assistant conversations; OPD never uses the observer role.
 
-    ``num_held_out`` unique prompts are removed first (the paper run reserved them for a
+    ``num_held_out`` unique user prompts are removed first (the paper run reserved them for a
     held-out KL eval), then the rest are shuffled.
     """
     return PromptOnlyDataset(
-        prompts=opd_train_prompts(prompts, num_held_out=num_held_out, seed=seed),
+        prompts=opd_train_user_prompts(user_prompts, num_held_out=num_held_out, seed=seed),
         batch_size=groups_per_batch,
         group_size=1,
         renderer=Qwen3DisableThinkingRenderer(tokenizer),

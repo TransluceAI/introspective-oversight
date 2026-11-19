@@ -36,7 +36,7 @@ BEHAVIOR_PREDICTION_PROMPT_TEMPLATE = textwrap.dedent(
 
 BEHAVIOR_PREDICTION_TASK_DESCRIPTION = textwrap.dedent(
     """
-    Below is a prompt and a list of sampled responses from the assistant. Your task is to generate {num_queries_per_prompt} query-answer pairs. For each pair, generate a query asking a second model (which sees only the prompt but not the assistant's responses) to predict a property of the assistant's response. Then provide an answer to the query, which should be consistent with all of the assistant's responses.
+    Below is a prompt and a list of sampled responses from the assistant. Your task is to generate {num_queries_per_user_prompt} query-answer pairs. For each pair, generate a query asking a second model (which sees only the prompt but not the assistant's responses) to predict a property of the assistant's response. Then provide an answer to the query, which should be consistent with all of the assistant's responses.
     """
 )
 
@@ -60,8 +60,8 @@ BEHAVIOR_PREDICTION_DECISION_FORMAT = textwrap.dedent(
     <query2>...</query2>
     <answer2>...</answer2>
     (and so on)
-    <query{num_queries_per_prompt}>...</query{num_queries_per_prompt}>
-    <answer{num_queries_per_prompt}>...</answer{num_queries_per_prompt}>
+    <query{num_queries_per_user_prompt}>...</query{num_queries_per_user_prompt}>
+    <answer{num_queries_per_user_prompt}>...</answer{num_queries_per_user_prompt}>
     """
 )
 
@@ -113,16 +113,16 @@ BEHAVIOR_PREDICTION_DATA_BLOCK = textwrap.dedent(
 )
 
 
-def behavior_prediction_template(num_queries_per_prompt: int) -> str:
+def behavior_prediction_template(num_queries_per_user_prompt: int) -> str:
     """Build the generator prompt, keeping the {prompt} and {assistant_responses} slots."""
     example = "\nHere is an example:\n" + _BEHAVIOR_PREDICTION_EXAMPLE_PROMPT_AND_RESPONSES + _BEHAVIOR_PREDICTION_EXAMPLE_FINAL_ANSWER
     return safe_format(
         BEHAVIOR_PREDICTION_PROMPT_TEMPLATE,
         task_description=safe_format(
-            BEHAVIOR_PREDICTION_TASK_DESCRIPTION + BEHAVIOR_PREDICTION_QUALITY_GUIDE, num_queries_per_prompt=str(num_queries_per_prompt)
+            BEHAVIOR_PREDICTION_TASK_DESCRIPTION + BEHAVIOR_PREDICTION_QUALITY_GUIDE, num_queries_per_user_prompt=str(num_queries_per_user_prompt)
         ),
         decision_format=safe_format(
-            BEHAVIOR_PREDICTION_DECISION_FORMAT, num_queries_per_prompt=str(num_queries_per_prompt)
+            BEHAVIOR_PREDICTION_DECISION_FORMAT, num_queries_per_user_prompt=str(num_queries_per_user_prompt)
         ),
         example=example,
         data=BEHAVIOR_PREDICTION_DATA_BLOCK,

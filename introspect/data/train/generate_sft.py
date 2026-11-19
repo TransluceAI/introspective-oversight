@@ -1,6 +1,6 @@
 """Generate the stage-1 SFT data. Two tasks, chosen by the first argument:
 
-1. ``behavior_prediction``: sample 5 assistant responses per prompt, then have a generator
+1. ``behavior_prediction``: sample 5 assistant responses per user prompt, then have a generator
    model write query-answer pairs predicting properties of the response. Each pair becomes
    one ``user, query, observer`` SFT item.
 2. ``hidden_trait``: have the generator write a catalog of assistant traits (``traits.json``),
@@ -14,9 +14,9 @@ train_sft.py mixes the two outputs (50/50 by default). User prompts come from
 Qwen/Qwen3.6-27B on Tinker, generator claude-haiku-4-5)::
 
     python -m introspect.data.train.generate_sft behavior_prediction \\
-        prompts_path=data/prompts/dolci_50k.jsonl output_dir=data/sft/behavior_prediction
+        user_prompts_path=data/prompts/dolci_50k.jsonl output_dir=data/sft/behavior_prediction
     python -m introspect.data.train.generate_sft hidden_trait \\
-        prompts_path=data/prompts/dolci_50k.jsonl output_dir=data/sft/hidden_trait
+        user_prompts_path=data/prompts/dolci_50k.jsonl output_dir=data/sft/hidden_trait
 
 Each task writes ``records.json`` (everything generated) and ``sft.json``
 (``{"items": [{"messages": [...]}]}``, read by train_sft.py). Generation runs are resumable:
@@ -54,6 +54,7 @@ from introspect.data.train.prompts import (
     trait_catalog_prompt,
     trait_system_prompt,
 )
+from introspect.train.shared import read_user_prompts
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +69,9 @@ class GenerateSFTConfig(docent.DocentOptions):
     output_dir: str
     seed: int = 42
 
-    # User prompts: .json {"items": [{"prompt": ...}]} or .jsonl, one {"prompt": ...} per line.
-    prompts_path: str
-    num_prompts: int = 0  # 0 uses every prompt; otherwise a seeded random sample
+    # User prompts: JSONL from scripts/prepare_prompts.py, one {"user_prompt": ...} per line.
+    user_prompts_path: str
+    num_user_prompts: int = 0  # 0 uses every prompt; otherwise a seeded random sample
 
     # Assistant whose behavior is described, sampled on Tinker.
     assistant_model: str = "Qwen/Qwen3.6-27B"
@@ -96,7 +97,7 @@ class BehaviorPredictionConfig(GenerateSFTConfig):
 
     assistant_max_tokens: int = 800
     generator_max_tokens: int = 2500
-    num_queries_per_prompt: int = 5
+    num_queries_per_user_prompt: int = 5
 
 
 @chz.chz(typecheck=True)
@@ -106,7 +107,7 @@ class HiddenTraitConfig(GenerateSFTConfig):
 
     assistant_max_tokens: int = 2000
     generator_max_tokens: int = 4096
-    prompts_per_trait: int = 10
+    user_prompts_per_trait: int = 10
 
     # Trait catalog. None generates <output_dir>/traits.json first (reused if it already exists).
     trait_catalog_path: str | None = None
@@ -268,16 +269,12 @@ def make_assistant(cfg: GenerateSFTConfig) -> TinkerChatSampler:
 # --- Inputs and outputs ----------------------------------------------------------------------
 
 
-def load_prompts(path: str, *, num_prompts: int, seed: int) -> list[str]:
-    raw = Path(path).read_bytes()
-    if path.endswith(".jsonl"):
-        rows = [msgspec.json.decode(line) for line in raw.splitlines() if line.strip()]
-    else:
-        rows = msgspec.json.decode(raw)["items"]
-    loaded = [row["prompt"] for row in rows]
-    if num_prompts > 0:
-        loaded = random.Random(seed).sample(loaded, num_prompts)
-    return loaded
+def load_user_prompts(path: str, *, num_user_prompts: int, seed: int) -> list[str]:
+    """All user prompts in the file, or a seeded sample of ``num_user_prompts``."""
+    user_prompts = read_user_prompts([path])
+    if num_user_prompts > 0:
+        user_prompts = random.Random(seed).sample(user_prompts, num_user_prompts)
+    return user_prompts
 
 
 def load_checkpoint(path: Path, record_type: type) -> dict[int, Any]:
@@ -346,9 +343,9 @@ def config_metadata(cfg: GenerateSFTConfig) -> dict[str, Any]:
 
 
 async def behavior_prediction(cfg: BehaviorPredictionConfig, generate: Generate) -> None:
-    user_prompts = load_prompts(cfg.prompts_path, num_prompts=cfg.num_prompts, seed=cfg.seed)
+    user_prompts = load_user_prompts(cfg.user_prompts_path, num_user_prompts=cfg.num_user_prompts, seed=cfg.seed)
     assistant = make_assistant(cfg)
-    template = behavior_prediction_template(cfg.num_queries_per_prompt)
+    template = behavior_prediction_template(cfg.num_queries_per_user_prompt)
 
     async def process(user_prompt: str) -> BehaviorPredictionRecord:
         responses = await assistant([{"role": "user", "content": user_prompt}])
@@ -438,13 +435,13 @@ async def hidden_trait(cfg: HiddenTraitConfig, generate: Generate) -> None:
         await trait_catalog(cfg, generate, catalog)
     traits = load_traits(catalog)
 
-    user_prompts = load_prompts(cfg.prompts_path, num_prompts=cfg.num_prompts, seed=cfg.seed)
+    user_prompts = load_user_prompts(cfg.user_prompts_path, num_user_prompts=cfg.num_user_prompts, seed=cfg.seed)
     random.Random(cfg.seed).shuffle(user_prompts)
-    # Each trait gets the next prompts_per_trait prompts, wrapping around if needed.
+    # Each trait gets the next user_prompts_per_trait prompts, wrapping around if needed.
     groups = [
-        (trait, user_prompts[(t * cfg.prompts_per_trait + p) % len(user_prompts)])
+        (trait, user_prompts[(t * cfg.user_prompts_per_trait + p) % len(user_prompts)])
         for t, trait in enumerate(traits)
-        for p in range(cfg.prompts_per_trait)
+        for p in range(cfg.user_prompts_per_trait)
     ]
     assistant = make_assistant(cfg)
 
@@ -526,7 +523,7 @@ async def run(cfg: GenerateSFTConfig) -> None:
 
 
 def main() -> None:
-    """The first argument picks the task, e.g. ``behavior_prediction prompts_path=...``."""
+    """The first argument picks the task, e.g. ``behavior_prediction user_prompts_path=...``."""
     cfg = chz.blueprint.dispatch_entrypoint(
         {"behavior_prediction": BehaviorPredictionConfig, "hidden_trait": HiddenTraitConfig}
     )

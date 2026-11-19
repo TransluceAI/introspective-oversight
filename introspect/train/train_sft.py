@@ -17,7 +17,7 @@ model on plain assistant prompts, so the observer training doesn't degrade the a
     python -m introspect.train.train_sft \
         behavior_prediction_path=data/sft/behavior_prediction/sft.json \
         hidden_trait_path=data/sft/hidden_trait/sft.json \
-        opd_prompt_paths=data/prompts/tulu3_opd.jsonl log_path=runs/stage1_sft
+        opd_user_prompt_paths=data/prompts/tulu3_opd.jsonl log_path=runs/stage1_sft
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ from introspect.train.shared import (
     THINKING_PREFILL,
     build_opd_dataset,
     create_training_client,
-    load_opd_prompts,
+    read_user_prompts,
     opd_step,
     save_checkpoint,
     split_by_key,
@@ -75,13 +75,13 @@ class SFTConfig:
     batch_size: int = 128
     max_length: int = 8192
     num_epochs: int = 1
-    test_num_prompts: int = 1000  # prompts held out for test NLL
+    test_num_user_prompts: int = 1000  # prompts held out for test NLL
     seed: int = 1337
 
     # OPD
     use_opd: bool = True
-    opd_prompt_paths: list[str] = chz.field(default_factory=list)
-    opd_held_out_prompts: int = 500  # kept out of OPD training, as in the paper run
+    opd_user_prompt_paths: list[str] = chz.field(default_factory=list)
+    opd_held_out_user_prompts: int = 500  # kept out of OPD training, as in the paper run
     opd_lr_multiplier: float = 1.0
     opd_groups_per_batch: int = 4
     opd_max_prompt_tokens: int = 1024
@@ -99,8 +99,8 @@ class SFTConfig:
             raise ValueError("give behavior_prediction_path, hidden_trait_path, or train_paths")
         if not 0 <= self.hidden_trait_fraction <= 1:
             raise ValueError("hidden_trait_fraction must be in [0, 1]")
-        if self.use_opd and not self.opd_prompt_paths:
-            raise ValueError("use_opd=true requires opd_prompt_paths")
+        if self.use_opd and not self.opd_user_prompt_paths:
+            raise ValueError("use_opd=true requires opd_user_prompt_paths")
 
 
 # --- Data ------------------------------------------------------------------------------------
@@ -233,13 +233,13 @@ def epoch_order(num_items: int, *, seed: int, epoch: int) -> np.ndarray:
 
 
 def split_items(
-    items: list[SFTItem], *, num_held_out_prompts: int, seed: int
+    items: list[SFTItem], *, num_held_out_user_prompts: int, seed: int
 ) -> tuple[list[SFTItem], list[SFTItem]]:
     """Split by user prompt so no held-out prompt appears in training."""
-    if num_held_out_prompts == 0:
+    if num_held_out_user_prompts == 0:
         return items, []
     train_prompts, _ = split_by_key(
-        [item.user_prompt() for item in items], num_held_out=num_held_out_prompts, seed=seed
+        [item.user_prompt() for item in items], num_held_out=num_held_out_user_prompts, seed=seed
     )
     train = [item for item in items if item.user_prompt() in train_prompts]
     held_out = [item for item in items if item.user_prompt() not in train_prompts]
@@ -270,7 +270,7 @@ async def sft_step(
 async def held_out_nll(
     training_client: tinker.TrainingClient, data: list[tinker.Datum], batch_size: int
 ) -> dict[str, float]:
-    """Mean per-example NLL on the held-out prompts, without updating weights."""
+    """Mean per-example NLL on the held-out user prompts, without updating weights."""
     total = 0.0
     for start in range(0, len(data), batch_size):
         chunk = data[start : start + batch_size]
@@ -292,7 +292,7 @@ async def train(cfg: SFTConfig) -> None:
 
     items = load_training_items(cfg)
     train_items, test_items = split_items(
-        items, num_held_out_prompts=cfg.test_num_prompts, seed=cfg.seed
+        items, num_held_out_user_prompts=cfg.test_num_user_prompts, seed=cfg.seed
     )
     logger.info("SFT: %d train items, %d test items", len(train_items), len(test_items))
 
@@ -304,7 +304,7 @@ async def train(cfg: SFTConfig) -> None:
     if steps_per_epoch == 0:
         raise ValueError(
             f"{len(train_items)} train items is less than one batch; lower batch_size "
-            f"(now {cfg.batch_size}) or test_num_prompts (now {cfg.test_num_prompts})"
+            f"(now {cfg.batch_size}) or test_num_user_prompts (now {cfg.test_num_user_prompts})"
         )
     num_steps = steps_per_epoch * cfg.num_epochs
 
@@ -325,11 +325,11 @@ async def train(cfg: SFTConfig) -> None:
     opd_dataset = opd_teacher = None
     if cfg.use_opd:
         opd_dataset = build_opd_dataset(
-            load_opd_prompts(cfg.opd_prompt_paths),
+            read_user_prompts(cfg.opd_user_prompt_paths),
             tokenizer=tokenizer,
             groups_per_batch=cfg.opd_groups_per_batch,
             max_prompt_tokens=cfg.opd_max_prompt_tokens,
-            num_held_out=cfg.opd_held_out_prompts,
+            num_held_out=cfg.opd_held_out_user_prompts,
             seed=cfg.seed,
         )
         # The teacher is the frozen base model underneath the LoRA.

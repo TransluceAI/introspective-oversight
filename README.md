@@ -54,14 +54,14 @@ Download the prompts, then generate the two kinds of SFT data:
 ```bash
 # Prompts: Tulu 3 for OPD, a 50k Dolci sample for SFT generation
 uv run python scripts/prepare_prompts.py source=tulu3 output=data/prompts/tulu3_opd.jsonl
-uv run python scripts/prepare_prompts.py source=dolci num_prompts=50000 output=data/prompts/dolci_50k.jsonl
+uv run python scripts/prepare_prompts.py source=dolci num_user_prompts=50000 output=data/prompts/dolci_50k.jsonl
 
 # Behavior prediction: predict properties of the assistant's response from the prompt alone
 uv run python -m introspect.data.train.generate_sft behavior_prediction \
-    prompts_path=data/prompts/dolci_50k.jsonl output_dir=data/sft/behavior_prediction
+    user_prompts_path=data/prompts/dolci_50k.jsonl output_dir=data/sft/behavior_prediction
 # Hidden trait: write a trait catalog, then sample responses with each trait as a hidden system prompt
 uv run python -m introspect.data.train.generate_sft hidden_trait \
-    prompts_path=data/prompts/dolci_50k.jsonl output_dir=data/sft/hidden_trait
+    user_prompts_path=data/prompts/dolci_50k.jsonl output_dir=data/sft/hidden_trait
 ```
 
 Generation is resumable: rerun the same command to continue an interrupted run.
@@ -83,7 +83,7 @@ To train on your own data instead, write a file of conversations that end in an 
 uv run python -m introspect.train.train_sft \
     behavior_prediction_path=data/sft/behavior_prediction/sft.json \
     hidden_trait_path=data/sft/hidden_trait/sft.json \
-    opd_prompt_paths=data/prompts/tulu3_opd.jsonl \
+    opd_user_prompt_paths=data/prompts/tulu3_opd.jsonl \
     log_path=runs/stage1_sft
 ```
 
@@ -171,7 +171,7 @@ Every data generator and both eval suites can upload their results to [Docent](h
 uv sync --extra docent
 export DOCENT_API_KEY=...
 uv run python -m introspect.data.train.generate_sft hidden_trait \
-    prompts_path=data/prompts/dolci_50k.jsonl output_dir=data/sft/hidden_trait export_docent=true
+    user_prompts_path=data/prompts/dolci_50k.jsonl output_dir=data/sft/hidden_trait export_docent=true
 ```
 
 The run prints the collection link and saves it as `docent_collection_url` in its output metadata. Rerunning reuses the collection and skips items already uploaded; `docent_collection=<name>` sets the collection name. To read a collection back into this repo's formats:

@@ -49,7 +49,7 @@ from introspect.train.shared import (
     ChatMessage,
     build_opd_dataset,
     create_training_client,
-    load_opd_prompts,
+    read_user_prompts,
     observer_renderer,
     opd_step,
     resolve_checkpoint,
@@ -96,8 +96,8 @@ class RLConfig:
     judge_reasoning: ReasoningEffort | None = "low"
     use_jeffreys_targets: bool = False  # (k + 0.5) / (n + 1) instead of the raw rate
     use_opd: bool = False  # interleave one OPD step per RL step
-    opd_prompt_paths: list[str] = chz.field(default_factory=list)
-    opd_held_out_prompts: int = 500
+    opd_user_prompt_paths: list[str] = chz.field(default_factory=list)
+    opd_held_out_user_prompts: int = 500
     opd_groups_per_batch: int = 4
     opd_max_tokens: int = 256
     opd_kl_coef: float = 1.0
@@ -109,8 +109,8 @@ class RLConfig:
 
     @chz.validate
     def _check(self) -> None:
-        if self.use_opd and not self.opd_prompt_paths:
-            raise ValueError("use_opd=true requires opd_prompt_paths")
+        if self.use_opd and not self.opd_user_prompt_paths:
+            raise ValueError("use_opd=true requires opd_user_prompt_paths")
         if self.use_kl_penalty and self.kl_penalty_coef <= 0:
             raise ValueError("use_kl_penalty=true requires a positive kl_penalty_coef")
         if not 0 < self.easy_group_threshold <= 1:
@@ -494,11 +494,11 @@ async def train(cfg: RLConfig) -> None:
     opd_dataset = opd_teacher = None
     if cfg.use_opd:
         opd_dataset = build_opd_dataset(
-            load_opd_prompts(cfg.opd_prompt_paths),
+            read_user_prompts(cfg.opd_user_prompt_paths),
             tokenizer=tokenizer,
             groups_per_batch=cfg.opd_groups_per_batch,
             max_prompt_tokens=1024,
-            num_held_out=cfg.opd_held_out_prompts,
+            num_held_out=cfg.opd_held_out_user_prompts,
             seed=cfg.seed,
         )
         opd_teacher = service_client.create_sampling_client(base_model=cfg.model_name)
