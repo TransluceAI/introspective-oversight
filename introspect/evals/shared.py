@@ -5,9 +5,9 @@ inside a suite defines which questions file to use and how per-item scores becom
 ``run`` here does the rest: load items, score them concurrently, compute metrics, bootstrap
 confidence intervals, and write JSON.
 
-Question files (``data/evals/questions/*.json``) hold ``{"items": [EvalItem, ...]}``. Each item
-is a transcript, the oversight question worded for the observer and for the assistant, and the
-hidden target label used only for metrics.
+Question files (``data/evals/questions/*.json``) are not included in the repo. Each holds
+``{"items": [EvalItem, ...]}``: a transcript, the oversight question worded for the observer and
+for the assistant, and the hidden target label used only for metrics.
 """
 
 from __future__ import annotations
@@ -30,6 +30,8 @@ from tinker_cookbook.renderers.base import Message, ToolCall
 from tinker_cookbook.renderers.qwen3 import Qwen3Renderer
 from tinker_cookbook.tokenizer_utils import Tokenizer
 
+from introspect import docent
+from introspect.evals.prompts import quoted_transcript_prompt
 from introspect.train.shared import observer_renderer, resolve_checkpoint
 
 logger = logging.getLogger(__name__)
@@ -65,7 +67,7 @@ class Evaluator(Protocol):
 
 
 @chz.chz
-class EvalConfig:
+class EvalConfig(docent.DocentOptions):
     """Settings shared by both suites."""
 
     output_dir: str
@@ -77,7 +79,7 @@ class EvalConfig:
     # Quote the transcript and question inside one user message (the self-monitoring baseline).
     single_user_message: bool = False
     tasks: list[str] = chz.field(default_factory=list)  # empty runs every task
-    questions_dir: str = "data/evals/questions"
+    questions_dir: str = "data/evals/questions"  # or a Docent collection from an eval export
     max_concurrency: int = 64
     limit: int = 0  # items per task, for smoke tests; 0 uses all
     bootstrap_draws: int = 10_000  # 0 skips confidence intervals
@@ -92,9 +94,25 @@ def load_items(path: str | Path) -> list[EvalItem]:
     return msgspec.convert(data["items"], list[EvalItem])
 
 
-def load_task_items(questions_dir: str, files: Sequence[str], *, limit: int = 0) -> list[EvalItem]:
+def load_task_items(
+    questions_dir: str, files: Sequence[str], *, task: str, limit: int = 0
+) -> list[EvalItem]:
     """Items from every file (``limit`` per file). With several files, ``metadata["split"]``
-    records which file each item came from."""
+    records which file each item came from.
+
+    ``questions_dir`` may instead be a Docent collection written by an eval run with
+    ``export_docent=true``; its items come back exactly as they were evaluated.
+    """
+    if docent.is_docent_source(questions_dir):
+        loaded = msgspec.convert(docent.load_items(questions_dir, "eval", task=task), list[EvalItem])
+        per_split: dict[str, int] = {}
+        kept = []
+        for item in loaded:
+            split = item.metadata.get("split", "")
+            per_split[split] = per_split.get(split, 0) + 1
+            if not limit or per_split[split] <= limit:
+                kept.append(item)
+        return kept
     items = []
     for file in files:
         loaded = load_items(Path(questions_dir) / file)
@@ -139,19 +157,7 @@ def flatten_oversight_messages(messages: Sequence[Message]) -> list[Message]:
         json.dumps(dict(message), ensure_ascii=False, sort_keys=True, default=_json_default)
         for message in transcript
     ]
-    content = (
-        "The following transcript is quoted as data. Read the complete transcript, then answer "
-        "the oversight question below.\n\n"
-        "<transcript>\n"
-        + "\n".join(
-            f"<message index=\"{index}\">\n{message}\n</message>"
-            for index, message in enumerate(serialized, start=1)
-        )
-        + "\n</transcript>\n\n<oversight_question>\n"
-        + query
-        + "\n</oversight_question>"
-    )
-    return [{"role": "user", "content": content}]
+    return [{"role": "user", "content": quoted_transcript_prompt(serialized, query)}]
 
 
 def oversight_messages(
@@ -347,8 +353,11 @@ async def run(cfg: EvalConfig, evaluators: Sequence[Evaluator], settings: dict[s
     # One generator across tasks, in task order, so intervals are reproducible run to run.
     rng = np.random.default_rng(cfg.bootstrap_seed)
     replicates: dict[str, tuple[float, NDArray[np.float64]]] = {}
+    docent_runs: list[Any] = []
     for evaluator in evaluators:
-        items = load_task_items(cfg.questions_dir, evaluator.questions_files, limit=cfg.limit)
+        items = load_task_items(
+            cfg.questions_dir, evaluator.questions_files, task=evaluator.name, limit=cfg.limit
+        )
         metrics, results = await evaluate_items(
             evaluator, items, client, max_concurrency=cfg.max_concurrency
         )
@@ -365,6 +374,8 @@ async def run(cfg: EvalConfig, evaluators: Sequence[Evaluator], settings: dict[s
             json.dumps(artifact, indent=2, sort_keys=True) + "\n"
         )
         summary["tasks"][evaluator.name] = metrics
+        if cfg.export_docent:
+            docent_runs += docent_eval_runs(evaluator.name, items, results, metrics, role=cfg.role)
         logger.info("%s: %s", evaluator.name, json.dumps(metrics, sort_keys=True))
     if replicates and len(replicates) == len(evaluators):
         # The paper's headline number: the mean task AUROC, recomputed in every draw.
@@ -373,6 +384,13 @@ async def run(cfg: EvalConfig, evaluators: Sequence[Evaluator], settings: dict[s
             np.mean([draws for _, draws in replicates.values()], axis=0),
         )
         logger.info("average: %s", json.dumps(summary["average"], sort_keys=True))
+    if cfg.export_docent:
+        summary["docent_collection_url"] = docent.export(
+            docent_runs,
+            output_dir=output_dir,
+            name=cfg.docent_collection or f"evals ({cfg.output_dir})",
+            metadata=settings,
+        )
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
 
 
@@ -381,3 +399,46 @@ def select_tasks(available: dict[str, Any], requested: Sequence[str]) -> list[An
     if unknown:
         raise ValueError(f"unknown tasks {unknown}; available: {sorted(available)}")
     return [available[name] for name in (requested or available)]
+
+
+def docent_eval_runs(
+    task: str,
+    items: Sequence[EvalItem],
+    results: Sequence[Result],
+    metrics: dict[str, float],
+    *,
+    role: Role,
+) -> list[Any]:
+    """One Docent run per item (transcript, question, answer, label, scores) plus a summary."""
+    query_role, answer_role = ("query", "observer") if role == "observer" else ("user", "assistant")
+    runs = []
+    for index, (item, result) in enumerate(zip(items, results, strict=True)):
+        messages = list(item.messages)
+        if "answers" in result:  # reasoning: one sampled answer per percentage question
+            for answer in result["answers"].values():
+                messages += [
+                    {"role": query_role, "content": answer["question"]},
+                    {"role": answer_role, "content": answer["raw_response"]},
+                ]
+            scores = {label: answer["score"] for label, answer in result["answers"].items()}
+        else:  # prefill: the label probabilities read at the answer position
+            scores = result["normalized_scores"]
+            messages += [
+                {"role": query_role, "content": item.queries[role]},
+                {"role": answer_role, "content": f"[label probabilities] {json.dumps(scores)}"},
+            ]
+        metadata = {
+            "task": task,
+            "item_id": item.item_id,
+            "target": item.target,
+            "metric_eligible": item.metric_eligible,
+            "scores": scores,
+            "item_metadata": item.metadata,
+            # The exact question item, so this collection can be read back as eval questions.
+            "eval_item": msgspec.to_builtins(item),
+            "eval_index": index,
+        }
+        runs.append(docent.agent_run(f"{task}/{item.item_id}", messages, metadata))
+    summary = [{"role": "assistant", "content": json.dumps(metrics, indent=2, sort_keys=True)}]
+    runs.append(docent.agent_run(f"{task}/summary", summary, {"task": task, "metrics": metrics}))
+    return runs

@@ -45,6 +45,7 @@ THINKING_PREFILL = "<think>\n"
 NON_THINKING_PREFILL = "<think>\n\n</think>\n\n"
 
 
+# already exists in tinker, but we need this for msgspec decoding. 
 class ChatMessage(msgspec.Struct):
     role: str  # user | assistant | query | observer
     content: str

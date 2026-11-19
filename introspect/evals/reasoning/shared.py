@@ -29,10 +29,6 @@ from introspect.evals.shared import (
     tie_aware_auroc,
 )
 
-PERCENTAGE_INSTRUCTIONS = """Give your estimated percentage chance that the answer is YES, from 0% to 100%. X may be any number in that range.
-
-Reason before answering. Finish with exactly one answer tag in the form <answer>X%</answer>."""
-
 _FINAL_PERCENTAGE_RE = re.compile(
     r"<answer>\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*</answer>\s*\Z", re.IGNORECASE
 )

@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pyright", "pytest"]
+docent = ["docent-python==0.1.74"]  # export_docent and introspect.docent download
 
 [build-system]
 requires = ["hatchling"]

@@ -44,6 +44,8 @@ from pathlib import Path
 import chz
 import msgspec
 
+from introspect import docent
+from introspect.data.train.prompts import rate_question
 from introspect.train.shared import ChatMessage, split_by_key
 
 
@@ -62,21 +64,6 @@ class Investigation(msgspec.Struct):
     baseline_count: int  # original rollouts that show the behavior
     num_rollouts: int
     experiments: list[Experiment]
-
-
-def rate_question(behavior: str, baseline_count: int, num_rollouts: int, edit: str) -> str:
-    return (
-        "We care about the following behavior exhibited by the assistant:\n\n"
-        f"{behavior.strip()}\n\n"
-        f"On the original version, this behavior occurs in {baseline_count}/{num_rollouts} "
-        f"responses ({round(100 * baseline_count / num_rollouts)}%).\n\n"
-        "Imagine we make the following change:\n\n"
-        f"{edit.strip()}\n\n"
-        f"If {num_rollouts} responses were generated from this version instead, in approximately "
-        "what percentage would the assistant exhibit this behavior instead?\n\n"
-        "Reason before answering. Finish with exactly one answer tag in the form "
-        "<answer>X%</answer>."
-    )
 
 
 def questions(investigation: Investigation) -> list[dict]:
@@ -108,7 +95,7 @@ def questions(investigation: Investigation) -> list[dict]:
 
 
 @chz.chz
-class GenerateRLConfig:
+class GenerateRLConfig(docent.DocentOptions):
     investigation_paths: list[str]
     output_dir: str
     num_held_out_investigations: int = 72  # the paper held out 200 questions from 72 prompts
@@ -134,8 +121,33 @@ def main(cfg: GenerateRLConfig) -> None:
 
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    metadata: dict = {**chz.asdict(cfg)}
+    if cfg.export_docent:
+        runs = [
+            docent.agent_run(
+                f"{split}/{item['item_id']}",
+                [*item["context_messages"], {"role": "query", "content": item["query"]}],
+                {
+                    "split": split,
+                    "item_id": item["item_id"],
+                    "prompt_group": item["prompt_group"],
+                    "answer": item["answer"],
+                    "item_metadata": item["metadata"],
+                },
+            )
+            for split, items in splits.items()
+            for item in items
+        ]
+        metadata["docent_collection_url"] = docent.export(
+            runs,
+            output_dir=output_dir,
+            name=cfg.docent_collection or f"rl_questions ({cfg.output_dir})",
+            metadata=metadata,
+        )
     for split, items in splits.items():
-        (output_dir / f"{split}.json").write_text(json.dumps({"items": items}, ensure_ascii=False))
+        (output_dir / f"{split}.json").write_text(
+            json.dumps({"metadata": metadata, "items": items}, ensure_ascii=False)
+        )
     answers = Counter(item["answer"] for items in splits.values() for item in items)
     print(
         f"{len(investigations)} investigations -> "

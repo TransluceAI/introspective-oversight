@@ -4,9 +4,11 @@ Used for LLM judges during training and for the generator model in data generati
 backend is a plain HTTPS call, so there are no provider SDKs to install. API keys come from
 ``GEMINI_API_KEY``, ``ANTHROPIC_API_KEY``, or ``OPENROUTER_API_KEY``.
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        sample = TextSampler(client, "anthropic", "claude-haiku-4-5", max_tokens=1024)
+    async with TextSampler("anthropic", "claude-haiku-4-5", max_tokens=1024) as sample:
         text = await sample("Say hi")
+
+The sampler owns its HTTP connections: they open when the ``async with`` block starts and close
+when it ends.
 """
 
 from __future__ import annotations
@@ -37,7 +39,6 @@ class TextSampler:
 
     def __init__(
         self,
-        client: httpx.AsyncClient,
         backend: Backend,
         model: str,
         *,
@@ -45,6 +46,7 @@ class TextSampler:
         max_tokens: int = 1024,
         reasoning: ReasoningEffort | None = None,  # Gemini thinking level / OpenRouter effort
         max_in_flight: int = 128,
+        timeout: float = 120.0,  # seconds per request
     ) -> None:
         if backend == "anthropic" and reasoning is not None:
             raise ValueError("reasoning is not supported for the anthropic backend")
@@ -53,12 +55,22 @@ class TextSampler:
             raise ValueError(f"{API_KEY_ENV[backend]} must be set for backend={backend}")
         self.backend = backend
         self.model = model
-        self._client = client
+        self._timeout = timeout
+        self._client: httpx.AsyncClient | None = None  # opened by ``async with``
         self._api_key = api_key
         self._temperature = temperature
         self._max_tokens = max_tokens
         self._reasoning = reasoning
         self._semaphore = asyncio.Semaphore(max_in_flight)
+
+    async def __aenter__(self) -> TextSampler:
+        self._client = httpx.AsyncClient(timeout=self._timeout)
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     def _request(self, prompt: str, system: str | None) -> tuple[str, dict[str, str], dict[str, Any]]:
         if self.backend == "gemini":
@@ -116,6 +128,8 @@ class TextSampler:
         return text.strip()
 
     async def _sample_once(self, prompt: str, system: str | None) -> str:
+        if self._client is None:
+            raise RuntimeError("use TextSampler inside `async with TextSampler(...) as sample:`")
         url, headers, body = self._request(prompt, system)
         async with self._semaphore:
             response = await self._client.post(url, headers=headers, json=body)

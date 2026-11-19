@@ -24,7 +24,7 @@ import chz
 from datasets import load_dataset
 
 
-# commit hash for version of prompts.
+# hash for prompt version. 
 SOURCES = {
     "tulu3": ("allenai/tulu-3-sft-mixture", "b14afda60f1bbebe55d5d2fa1e4df5042f97f8be"),
     "dolci": ("allenai/Dolci-Instruct-SFT-7B", "bd3c8f3a9b2cc5a9682e44b96ddd0bb2ff027221"),
@@ -38,7 +38,7 @@ class PrepareConfig:
     num_prompts: int = 0  # 0 keeps every prompt; otherwise a seeded random sample
     seed: int = 42
 
-
+# we only include single-turn prompts for SFT + OPD training.
 def single_turn_prompts(rows: Iterable[dict[str, Any]]) -> list[str]:
     """User prompts of one-turn conversations, in dataset order."""
     prompts = []

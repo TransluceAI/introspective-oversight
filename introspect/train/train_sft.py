@@ -7,11 +7,16 @@ Each SFT item is a short conversation ending in an ``observer`` turn; only that 
                              {"role": "query", "content": ...},
                              {"role": "observer", "content": ...}]}]}
 
+Pass the two ``generate_sft.py`` outputs and they are mixed here: ``hidden_trait_fraction`` of
+the items come from hidden trait (default half), the rest from behavior prediction. Any other
+SFT files go in ``train_paths`` and are used as-is.
+
 With ``use_opd=true`` each step first takes one on-policy distillation step toward the base
 model on plain assistant prompts, so the observer training doesn't degrade the assistant.
 
     python -m introspect.train.train_sft \
-        train_paths=data/sft/stage1_mix.json \
+        behavior_prediction_path=data/sft/behavior_prediction/sft.json \
+        hidden_trait_path=data/sft/hidden_trait/sft.json \
         opd_prompt_paths=data/prompts/tulu3_opd.jsonl log_path=runs/stage1_sft
 """
 
@@ -20,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -35,6 +41,7 @@ from tinker_cookbook.supervised.common import compute_mean_nll, datum_from_model
 from tinker_cookbook.tokenizer_utils import Tokenizer, get_tokenizer
 from tinker_cookbook.utils import ml_log
 
+from introspect import docent
 from introspect.train.shared import (
     ChatMessage,
     NON_THINKING_PREFILL,
@@ -54,8 +61,11 @@ logger = logging.getLogger(__name__)
 @chz.chz
 class SFTConfig:
     # Data and checkpoints
-    train_paths: list[str]
     log_path: str
+    behavior_prediction_path: str | None = None  # sft.json from generate_sft behavior_prediction
+    hidden_trait_path: str | None = None  # sft.json from generate_sft hidden_trait
+    hidden_trait_fraction: float = 0.5  # share of hidden-trait items when both are given
+    train_paths: list[str] = chz.field(default_factory=list)  # other SFT files, used as-is
     init_checkpoint: str | None = None  # tinker:// URI or a previous log dir; None = base model
 
     # SFT
@@ -85,6 +95,10 @@ class SFTConfig:
 
     @chz.validate
     def _check(self) -> None:
+        if not (self.behavior_prediction_path or self.hidden_trait_path or self.train_paths):
+            raise ValueError("give behavior_prediction_path, hidden_trait_path, or train_paths")
+        if not 0 <= self.hidden_trait_fraction <= 1:
+            raise ValueError("hidden_trait_fraction must be in [0, 1]")
         if self.use_opd and not self.opd_prompt_paths:
             raise ValueError("use_opd=true requires opd_prompt_paths")
 
@@ -103,16 +117,64 @@ class SFTItem(msgspec.Struct):
         return next(message.content for message in self.messages if message.role == "user")
 
 
-def load_items(paths: list[str]) -> list[SFTItem]:
-    """Read ``{"items": [...]}`` files (any other top-level keys are ignored)."""
-    items = [
-        item
-        for path in paths
-        for item in msgspec.convert(msgspec.json.decode(Path(path).read_bytes())["items"], list[SFTItem])
-    ]
+def load_items(paths: list[str], *, snapshot_dir: str | None = None) -> list[SFTItem]:
+    """Read ``{"items": [...]}`` files (other top-level keys are ignored) or Docent collections.
+
+    A Docent collection (a link or ``docent://<id>``) is saved to ``snapshot_dir`` as read.
+    """
+    items = []
+    for path in paths:
+        if docent.is_docent_source(path):
+            rows = docent.load_items(path, "sft", snapshot_dir=snapshot_dir)
+        else:
+            rows = msgspec.json.decode(Path(path).read_bytes())["items"]
+        items += msgspec.convert(rows, list[SFTItem])
     if not items:
         raise ValueError("SFT files contain no items")
     return items
+
+
+def mix_sources(
+    behavior: list[SFTItem], hidden_trait: list[SFTItem], *, hidden_trait_fraction: float, seed: int
+) -> list[SFTItem]:
+    """The largest mix with ``hidden_trait_fraction`` of its items from hidden trait.
+
+    Behavior-prediction items whose prompt also appears in the hidden-trait data are dropped
+    first. Whichever source runs out first is used whole; the other is sampled down.
+    """
+    hidden_prompts = {item.user_prompt() for item in hidden_trait}
+    behavior = [item for item in behavior if item.user_prompt() not in hidden_prompts]
+    if hidden_trait_fraction == 0:
+        return behavior
+    if hidden_trait_fraction == 1:
+        return hidden_trait
+    total = min(
+        len(hidden_trait) / hidden_trait_fraction, len(behavior) / (1 - hidden_trait_fraction)
+    )
+    num_hidden = min(len(hidden_trait), round(total * hidden_trait_fraction))
+    num_behavior = min(len(behavior), round(total * (1 - hidden_trait_fraction)))
+    rng = random.Random(seed)
+    return rng.sample(hidden_trait, num_hidden) + rng.sample(behavior, num_behavior)
+
+
+def load_training_items(cfg: SFTConfig) -> list[SFTItem]:
+    """``train_paths`` as-is, plus the two generated sources mixed at ``hidden_trait_fraction``."""
+    def load(paths: list[str]) -> list[SFTItem]:
+        return load_items(paths, snapshot_dir=cfg.log_path)
+
+    behavior = load([cfg.behavior_prediction_path]) if cfg.behavior_prediction_path else []
+    hidden = load([cfg.hidden_trait_path]) if cfg.hidden_trait_path else []
+    if behavior and hidden:
+        mixed = mix_sources(
+            behavior, hidden, hidden_trait_fraction=cfg.hidden_trait_fraction, seed=cfg.seed
+        )
+        logger.info(
+            "Mixed %d items (%.0f%% hidden trait) from %d behavior-prediction and %d hidden-trait",
+            len(mixed), 100 * cfg.hidden_trait_fraction, len(behavior), len(hidden),
+        )
+    else:
+        mixed = behavior + hidden
+    return (load(cfg.train_paths) if cfg.train_paths else []) + mixed
 
 
 @dataclass(frozen=True)
@@ -161,7 +223,7 @@ def to_datum(item: SFTItem, *, tokenizer: Tokenizer, renderer: Qwen3Renderer, ma
 
 
 def epoch_order(num_items: int, *, seed: int, epoch: int) -> np.ndarray:
-    """Item order for one epoch, identical to the paper run.
+    """Item order for one epoch, shuffled the same way as the paper run.
 
     That run shuffled once with HF ``Dataset.shuffle(seed)`` and then reshuffled each epoch with
     the cookbook's ``set_epoch(seed=epoch)``. Both are numpy ``default_rng`` permutations.
@@ -228,7 +290,7 @@ async def train(cfg: SFTConfig) -> None:
     tokenizer = get_tokenizer(cfg.model_name)
     renderer = Qwen3Renderer(tokenizer)  # observer prefill is added by to_datum
 
-    items = load_items(cfg.train_paths)
+    items = load_training_items(cfg)
     train_items, test_items = split_items(
         items, num_held_out_prompts=cfg.test_num_prompts, seed=cfg.seed
     )
