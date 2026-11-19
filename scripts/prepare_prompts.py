@@ -8,7 +8,8 @@
 Both keep conversations that are exactly one user turn and one assistant reply, and keep only the
 user prompt. Tulu 3 is pinned to the revision the paper used, and its prompts keep their dataset
 order, which reproduces the paper's OPD prompt file exactly. The paper's 50k Dolci sample was
-drawn by an unrecorded procedure, so this draws a fresh seeded one.
+drawn by an unrecorded procedure, so this draws a fresh seeded one from Dolci pinned to its
+2026-02-03 revision, the latest as of mid-August 2026.
 """
 
 from __future__ import annotations
@@ -22,9 +23,11 @@ from typing import Any, Literal, cast
 import chz
 from datasets import load_dataset
 
+
+# commit hash for version of prompts.
 SOURCES = {
     "tulu3": ("allenai/tulu-3-sft-mixture", "b14afda60f1bbebe55d5d2fa1e4df5042f97f8be"),
-    "dolci": ("allenai/Dolci-Instruct-SFT-7B", None),
+    "dolci": ("allenai/Dolci-Instruct-SFT-7B", "bd3c8f3a9b2cc5a9682e44b96ddd0bb2ff027221"),
 }
 
 
