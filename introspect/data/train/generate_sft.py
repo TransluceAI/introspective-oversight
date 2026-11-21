@@ -420,11 +420,8 @@ async def trait_catalog(cfg: HiddenTraitConfig, generate: Generate, path: Path) 
 
 
 def load_traits(path: str | Path) -> list[str]:
-    """Read our catalog ({"traits": [...]}) or the original's ({"interventions": [...]})."""
-    data = json.loads(Path(path).read_text())
-    if "traits" in data:
-        return data["traits"]
-    return [row["trait"] for row in data["interventions"] if row["intervention_type"] == "trait"]
+    """Read a trait catalog, ``{"traits": [...]}``, as written by the hidden_trait task."""
+    return json.loads(Path(path).read_text())["traits"]
 
 
 async def hidden_trait(cfg: HiddenTraitConfig, generate: Generate) -> None:
@@ -552,26 +549,19 @@ def parse_behavior_prediction_qas(generator_response: str) -> list[QAPair]:
 
 
 def parse_traits(response: str) -> list[str] | None:
-    """Read the catalog JSON (optionally in a code fence), skipping entries without a trait.
+    """Read ``{"traits": [...]}`` (optionally in a code fence), skipping empty or non-text entries.
 
     Returns None if the response isn't a catalog at all.
     """
     stripped = response.strip()
     fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", stripped, re.DOTALL | re.IGNORECASE)
     try:
-        rows = msgspec.json.decode(fenced.group(1) if fenced else stripped)["interventions"]
+        traits = msgspec.json.decode(fenced.group(1) if fenced else stripped)["traits"]
     except (msgspec.DecodeError, KeyError, TypeError):
         return None
-    if not isinstance(rows, list):
+    if not isinstance(traits, list):
         return None
-    return [
-        row["trait"].strip()
-        for row in rows
-        if isinstance(row, dict)
-        and row.get("intervention_type") == "trait"
-        and isinstance(row.get("trait"), str)
-        and row["trait"].strip()
-    ]
+    return [trait.strip() for trait in traits if isinstance(trait, str) and trait.strip()]
 
 
 _QUERY_RE = re.compile(r"<query(\d+)>\s*(.*?)\s*</query\1>", re.DOTALL | re.IGNORECASE)
