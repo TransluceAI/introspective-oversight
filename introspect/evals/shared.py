@@ -15,8 +15,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
-from collections.abc import Hashable, Sequence
+from collections import Counter
+from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -58,6 +58,10 @@ class Evaluator(Protocol):
     questions_files: Sequence[str]  # read together; with several, each item is tagged ``split``
 
     async def score(self, client: tinker.SamplingClient, item: EvalItem) -> Result: ...
+
+    def check_items(self, items: Sequence[EvalItem]) -> None:
+        """Raise before sampling if the metrics can't be computed on these items."""
+        ...
 
     def metrics(self, results: Sequence[Result]) -> dict[str, float]: ...
 
@@ -194,12 +198,15 @@ def make_sampling_client(model_name: str, checkpoint: str | None) -> tinker.Samp
 def tie_aware_auroc(labels: Sequence[bool], scores: Sequence[float]) -> float:
     """Probability a random positive outscores a random negative; ties count half.
 
-    NaN when either class is missing (possible only on small subsets).
+    Raises if either class is missing: ``check_items`` rules that out before sampling, so it
+    only happens when answers fail to parse.
     """
     positives = [score for label, score in zip(labels, scores, strict=True) if label]
     negatives = [score for label, score in zip(labels, scores, strict=True) if not label]
     if not positives or not negatives:
-        return float("nan")
+        raise ValueError(
+            f"AUROC needs positive and negative scores, got {len(positives)} and {len(negatives)}"
+        )
     wins = sum(
         1.0 if positive > negative else 0.5 if positive == negative else 0.0
         for positive in positives
@@ -208,10 +215,47 @@ def tie_aware_auroc(labels: Sequence[bool], scores: Sequence[float]) -> float:
     return wins / (len(positives) * len(negatives))
 
 
-def divide_or_nan(numerator: float, denominator: float) -> float:
-    """``numerator / denominator``, or NaN when there is nothing to divide by (e.g. a mean over
-    zero positives on a small ``limit`` subset), so one empty class can't crash a run."""
-    return numerator / denominator if denominator else float("nan")
+def require_classes(
+    task: str, labels_by_group: Mapping[str, Sequence[str]], classes: Sequence[str]
+) -> None:
+    """Raise if any group the metrics split on lacks one of ``classes``.
+
+    Every AUROC, recall and per-class mean needs at least one question of each class, and a
+    small ``limit`` subset can leave one out. Run before sampling, so nothing is spent first.
+    """
+    for group, labels in labels_by_group.items():
+        missing = [label for label in classes if label not in labels]
+        if missing:
+            where = f"{task}/{group}" if group else task
+            have = f"has {dict(Counter(labels))}" if labels else "has no questions at all"
+            raise ValueError(
+                f"{where}: no {', '.join(missing)} questions ({have}); "
+                "raise limit= or check the question files"
+            )
+
+
+def require_binary_classes(
+    task: str, items: Sequence[EvalItem], *, positive_target: str, behaviors: Sequence[str] = ()
+) -> None:
+    """Positive and negative eligible questions overall and within each behavior."""
+    eligible = [item for item in items if item.metric_eligible]
+    groups = {"": eligible} | {
+        behavior: [item for item in eligible if item.metadata.get("behavior") == behavior]
+        for behavior in behaviors
+    }
+    labels = {
+        group: ["positive" if item.target == positive_target else "negative" for item in subset]
+        for group, subset in groups.items()
+    }
+    require_classes(task, labels, ("positive", "negative"))
+
+
+def targets_by_split(items: Sequence[EvalItem]) -> dict[str, list[str]]:
+    """Value-leakage targets per direction (``forward`` / ``reverse``)."""
+    groups: dict[str, list[str]] = {}
+    for item in items:
+        groups.setdefault(item.metadata["split"].removeprefix("value_leakage_"), []).append(item.target)
+    return groups
 
 
 # --- Bootstrap ---------------------------------------------------------------------------------
@@ -354,15 +398,19 @@ async def run(cfg: EvalConfig, evaluators: Sequence[Evaluator], settings: dict[s
     rng = np.random.default_rng(cfg.bootstrap_seed)
     replicates: dict[str, tuple[float, NDArray[np.float64]]] = {}
     docent_runs: list[Any] = []
+    # Load and check every task before sampling any, so a bad subset fails in seconds.
+    task_items = []
     for evaluator in evaluators:
         items = load_task_items(
             cfg.questions_dir, evaluator.questions_files, task=evaluator.name, limit=cfg.limit
         )
+        evaluator.check_items(items)
+        task_items.append(items)
+    for evaluator, items in zip(evaluators, task_items, strict=True):
         metrics, results = await evaluate_items(
             evaluator, items, client, max_concurrency=cfg.max_concurrency
         )
-        # An undefined AUROC (only possible on a small ``limit`` subset) gets no interval.
-        if cfg.bootstrap_draws and math.isfinite(metrics["auroc"]):
+        if cfg.bootstrap_draws:
             rows = evaluator.bootstrap_rows(results)
             point = float(bootstrap_auroc(rows, np.ones((1, len(rows))))[0])
             draws = bootstrap_auroc(rows, bootstrap_weights(rows, cfg.bootstrap_draws, rng))
@@ -377,7 +425,7 @@ async def run(cfg: EvalConfig, evaluators: Sequence[Evaluator], settings: dict[s
         if cfg.export_docent:
             docent_runs += docent_eval_runs(evaluator.name, items, results, metrics, role=cfg.role)
         logger.info("%s: %s", evaluator.name, json.dumps(metrics, sort_keys=True))
-    if replicates and len(replicates) == len(evaluators):
+    if replicates:
         # The paper's headline number: the mean task AUROC, recomputed in every draw.
         summary["average"] = percentile_interval(
             float(np.mean([point for point, _ in replicates.values()])),

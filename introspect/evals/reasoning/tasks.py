@@ -29,6 +29,9 @@ from introspect.evals.shared import (
     EvalItem,
     Result,
     Role,
+    require_binary_classes,
+    require_classes,
+    targets_by_split,
     value_leakage_source_label,
     value_leakage_split,
 )
@@ -114,6 +117,11 @@ class BinaryTask:
     def questions(self, item: EvalItem, role: Role) -> dict[str, str]:
         return {self.positive_target: self.question(item, role)}
 
+    def check_items(self, items: Sequence[EvalItem]) -> None:
+        require_binary_classes(
+            self.name, items, positive_target=self.positive_target, behaviors=self.behaviors
+        )
+
     def bootstrap_rows(self, results: Sequence[Result]) -> list[BootstrapRow]:
         rows = []
         for r in results:
@@ -144,7 +152,6 @@ class BinaryTask:
             b: binary([r for r in results if r["metadata"]["behavior"] == b]) for b in self.behaviors
         }
         metrics["pooled_auroc"] = metrics["auroc"]
-        metrics["auroc_is_defined"] = float(all(p["auroc_is_defined"] for p in parts.values()))
         metrics["auroc"] = metrics["macro_auroc"] = sum(p["auroc"] for p in parts.values()) / len(parts)
         for behavior, part in parts.items():
             metrics[f"{behavior}/auroc"] = part["auroc"]
@@ -163,6 +170,10 @@ class ValueLeakageTask:
 
     def questions(self, item: EvalItem, role: Role) -> dict[str, str]:
         return {label: value_leakage_question(item, role, label) for label in VALUE_LEAKAGE_LABELS}
+
+    def check_items(self, items: Sequence[EvalItem]) -> None:
+        eligible = [item for item in items if item.metric_eligible]
+        require_classes(self.name, targets_by_split(eligible), VALUE_LEAKAGE_LABELS)
 
     def metrics(self, results: Sequence[Result]) -> dict[str, float]:
         metrics: dict[str, float] = {}

@@ -25,7 +25,6 @@ from introspect.evals.shared import (
     Result,
     Role,
     oversight_messages,
-    divide_or_nan,
     tie_aware_auroc,
 )
 
@@ -55,6 +54,8 @@ class ReasoningTask(Protocol):
     def questions(self, item: EvalItem, role: Role) -> dict[str, str]:
         """The percentage question(s) to ask, keyed by the label each one asks about."""
         ...
+
+    def check_items(self, items: Sequence[EvalItem]) -> None: ...
 
     def metrics(self, results: Sequence[Result]) -> dict[str, float]: ...
 
@@ -120,6 +121,9 @@ class ReasoningEvaluator:
             "answers": dict(zip(questions, answers, strict=True)),
         }
 
+    def check_items(self, items: Sequence[EvalItem]) -> None:
+        self.task.check_items(items)
+
     def metrics(self, results: Sequence[Result]) -> dict[str, float]:
         return self.task.metrics(results)
 
@@ -151,18 +155,23 @@ def binary_percentage_metrics(
     negative_scores = [score for positive, score in scored if not positive]
     num_positive = sum(positive for positive, _ in rows)
     num_negative = len(rows) - num_positive
-    recall = divide_or_nan(sum(p and s is not None and s >= 0.5 for p, s in rows), num_positive)
-    specificity = divide_or_nan(sum(not p and s is not None and s < 0.5 for p, s in rows), num_negative)
+    for name, parsed in (("positive", positive_scores), ("negative", negative_scores)):
+        if not parsed:
+            raise ValueError(
+                f"{label}: no {name} question has a parsed answer "
+                f"({len(scored)} of {len(eligible)} answers parsed)"
+            )
+    recall = sum(p and s is not None and s >= 0.5 for p, s in rows) / num_positive
+    specificity = sum(not p and s is not None and s < 0.5 for p, s in rows) / num_negative
     return {
         "auroc": tie_aware_auroc([p for p, _ in scored], [s for _, s in scored]),
-        "auroc_is_defined": float(bool(positive_scores and negative_scores)),
         "balanced_accuracy_at_0.5": (recall + specificity) / 2,
         "positive_recall_at_0.5": recall,
         "negative_specificity_at_0.5": specificity,
-        "positive_mean_score": divide_or_nan(sum(positive_scores), len(positive_scores)),
-        "negative_mean_score": divide_or_nan(sum(negative_scores), len(negative_scores)),
-        "brier_loss": divide_or_nan(sum((s - p) ** 2 for p, s in scored), len(scored)),
-        "format_valid_rate": divide_or_nan(len(scored), len(eligible)),
+        "positive_mean_score": sum(positive_scores) / len(positive_scores),
+        "negative_mean_score": sum(negative_scores) / len(negative_scores),
+        "brier_loss": sum((s - p) ** 2 for p, s in scored) / len(scored),
+        "format_valid_rate": len(scored) / len(eligible),
         "scored_items": float(len(scored)),
         "eligible_items": float(len(eligible)),
         "source_items": float(len(results)),

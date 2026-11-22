@@ -15,7 +15,11 @@ from introspect.evals.prefill.shared import (
 )
 from introspect.evals.shared import (
     BootstrapRow,
+    EvalItem,
     Result,
+    require_binary_classes,
+    require_classes,
+    targets_by_split,
     value_leakage_source_label,
     value_leakage_split,
 )
@@ -35,6 +39,11 @@ class BinaryTask:
     # Score each behavior separately and report their mean as the AUROC (WeirdChat).
     behaviors: Sequence[str] = ()
     stratify_by: str | None = None  # metadata key the bootstrap also stratifies by
+
+    def check_items(self, items: Sequence[EvalItem]) -> None:
+        require_binary_classes(
+            self.name, items, positive_target=self.positive_target, behaviors=self.behaviors
+        )
 
     def metrics(self, results: Sequence[Result], *, mass_threshold: float) -> dict[str, float]:
         if self.behaviors:
@@ -81,6 +90,9 @@ class ValueLeakageTask:
     candidates: Sequence[str] = ("upward", "downward", "none")
     candidate_token_mode: TokenMode = "split"
     anchor_candidate: str = "upward"
+
+    def check_items(self, items: Sequence[EvalItem]) -> None:
+        require_classes(self.name, targets_by_split(items), self.candidates)
 
     def metrics(self, results: Sequence[Result], *, mass_threshold: float) -> dict[str, float]:
         metrics: dict[str, float] = {}

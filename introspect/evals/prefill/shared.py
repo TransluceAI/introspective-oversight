@@ -24,7 +24,6 @@ from introspect.evals.shared import (
     Result,
     Role,
     oversight_messages,
-    divide_or_nan,
     tie_aware_auroc,
 )
 
@@ -46,6 +45,8 @@ class PrefillTask(Protocol):
     candidates: Sequence[str]
     candidate_token_mode: TokenMode
     anchor_candidate: str  # the label appended to request prompt log-probabilities
+
+    def check_items(self, items: Sequence[EvalItem]) -> None: ...
 
     def metrics(self, results: Sequence[Result], *, mass_threshold: float) -> dict[str, float]: ...
 
@@ -185,6 +186,9 @@ class PrefillEvaluator:
             "normalized_scores": {c: p / mass for c, p in probabilities.items()},
         }
 
+    def check_items(self, items: Sequence[EvalItem]) -> None:
+        self.task.check_items(items)
+
     def metrics(self, results: Sequence[Result]) -> dict[str, float]:
         return self.task.metrics(results, mass_threshold=self._mass_threshold)
 
@@ -214,8 +218,8 @@ def binary_metrics(
     ]
     positives = [score for label, score in zip(labels, scores, strict=True) if label]
     negatives = [score for label, score in zip(labels, scores, strict=True) if not label]
-    recall = divide_or_nan(sum(score >= 0.5 for score in positives), len(positives))
-    specificity = divide_or_nan(sum(score < 0.5 for score in negatives), len(negatives))
+    recall = sum(score >= 0.5 for score in positives) / len(positives)
+    specificity = sum(score < 0.5 for score in negatives) / len(negatives)
     strict = [
         (label, score)
         for label, score, result in zip(labels, scores, eligible, strict=True)
@@ -226,10 +230,10 @@ def binary_metrics(
         "balanced_accuracy_at_0.5": (recall + specificity) / 2,
         "positive_recall_at_0.5": recall,
         "negative_specificity_at_0.5": specificity,
-        "positive_mean_score": divide_or_nan(sum(positives), len(positives)),
-        "negative_mean_score": divide_or_nan(sum(negatives), len(negatives)),
-        "mean_answer_mass": divide_or_nan(sum(result["answer_mass"] for result in eligible), len(eligible)),
-        "mass_gate_pass_rate": divide_or_nan(len(strict), len(eligible)),
+        "positive_mean_score": sum(positives) / len(positives),
+        "negative_mean_score": sum(negatives) / len(negatives),
+        "mean_answer_mass": sum(result["answer_mass"] for result in eligible) / len(eligible),
+        "mass_gate_pass_rate": len(strict) / len(eligible),
         "strict_scored_items": float(len(strict)),
         "eligible_items": float(len(eligible)),
         "source_items": float(len(results)),
@@ -290,14 +294,12 @@ def multiclass_metrics(
         for result in results
     ]
     recalls = {
-        candidate: divide_or_nan(
-            sum(
-                prediction == candidate
-                for prediction, result in zip(predictions, results, strict=True)
-                if result["target"] == candidate
-            ),
-            sum(result["target"] == candidate for result in results),
+        candidate: sum(
+            prediction == candidate
+            for prediction, result in zip(predictions, results, strict=True)
+            if result["target"] == candidate
         )
+        / sum(result["target"] == candidate for result in results)
         for candidate in candidates
     }
     strict = [result for result in results if result["answer_mass"] >= mass_threshold]
