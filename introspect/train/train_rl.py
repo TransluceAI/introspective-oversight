@@ -125,15 +125,14 @@ class RLItem(msgspec.Struct):
 
     query: str  # shown verbatim in the query turn
     answer: int  # the measured rate as a percentage, 0-100
-    context_messages: list[ChatMessage] = msgspec.field(default_factory=list)
-    user_prompt: str = ""
+    context_messages: list[ChatMessage]  # the conversation the query asks about
     item_id: str | None = None
     prompt_group: str | None = None
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.context_messages and not self.user_prompt.strip():
-            raise ValueError("RL item needs context_messages or a user_prompt")
+        if not self.context_messages:
+            raise ValueError("RL item needs a non-empty context_messages")
         if not 0 <= self.answer <= 100:
             raise ValueError(f"RL answer must be a percentage in [0, 100], got {self.answer!r}")
 
@@ -146,10 +145,7 @@ class RLItem(msgspec.Struct):
         return (successes + 0.5) / (trials + 1)
 
     def messages(self) -> list[Message]:
-        context: list[Message] = [
-            {"role": message.role, "content": message.content} for message in self.context_messages
-        ]
-        return context or [{"role": "user", "content": self.user_prompt}]
+        return [{"role": message.role, "content": message.content} for message in self.context_messages]
 
 
 def load_items(path: str, *, split: str, snapshot_dir: str | None = None) -> list[RLItem]:
@@ -162,9 +158,6 @@ def load_items(path: str, *, split: str, snapshot_dir: str | None = None) -> lis
     else:
         data = msgspec.json.decode(Path(path).read_bytes())
         rows = data["items"] if isinstance(data, dict) else data
-    for row in rows:
-        if isinstance(row["answer"], str):  # the paper's data files store "30%"
-            row["answer"] = int(row["answer"].removesuffix("%"))
     items = msgspec.convert(rows, list[RLItem])
     if not items:
         raise ValueError(f"{path} contains no RL items")
